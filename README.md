@@ -16,7 +16,7 @@ Modes for AC3259/10 is now fully supported.
 
 
 ## Installation:
-Take the folder "philips_airpurifier" and place it in folder "custom_components". 
+Take the folder "custom_components/philips_airpurifier" and place it in folder "custom_components". 
 Restart.
 Then copy the yaml down below and place it in configuration.yaml, save and restart. (Remember to change the ip-address to your Philips IP address).
 Restart.
