@@ -3,7 +3,9 @@
 import json
 import logging
 import random
+import threading
 from typing import Any, Optional
+import urllib.error
 import urllib.request
 
 import voluptuous as vol
@@ -34,6 +36,7 @@ from .const import *
 __version__ = '0.3.5'
 
 _LOGGER = logging.getLogger(__name__)
+HTTP_TIMEOUT = 5
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required(CONF_HOST): cv.string,
@@ -142,6 +145,8 @@ class PhilipsAirPurifierFan(FanEntity):
         self._state = None
         self._model = None
         self._session_key = None
+        self._io_lock = threading.RLock()
+        self._last_update_error = None
 
         self._fan_speed = None
         self._fan_preset_mode = None
@@ -176,8 +181,13 @@ class PhilipsAirPurifierFan(FanEntity):
             self._update_state()
             self._update_model()
             self._available = True
-        except Exception:
+            self._last_update_error = None
+        except Exception as exc:
             self._available = False
+            error = (type(exc), str(exc))
+            if error != self._last_update_error:
+                _LOGGER.warning("Could not update Philips air purifier at %s", self._host, exc_info=True)
+                self._last_update_error = error
 
     def _update_filters(self):
         url = 'http://{}/di/v1/products/1/fltsts'.format(self._host)
@@ -251,7 +261,7 @@ class PhilipsAirPurifierFan(FanEntity):
 
     @property
     def is_on(self):
-        return self._state is 'on'
+        return self._state == 'on'
 
     @property
     def state(self):
@@ -420,10 +430,21 @@ class PhilipsAirPurifierFan(FanEntity):
 
     def set_values(self, values):
         """Update device state."""
+        with self._io_lock:
+            try:
+                self._set_values_once(values)
+            except urllib.error.HTTPError as exc:
+                if exc.code not in (400, 401, 403):
+                    raise
+                self._get_key()
+                self._set_values_once(values)
+
+    def _set_values_once(self, values):
+        """Send one encrypted device state update."""
         body = encrypt(values, self._session_key)
         url = 'http://{}/di/v1/products/1/air'.format(self._host)
         req = urllib.request.Request(url=url, data=body, method='PUT')
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
             resp = response.read()
             resp = decrypt(resp.decode('ascii'), self._session_key)
             self._assign_philips_states(json.loads(resp))
@@ -437,7 +458,7 @@ class PhilipsAirPurifierFan(FanEntity):
         data = json.dumps({'diffie': format(A, 'x')})
         data_enc = data.encode('ascii')
         req = urllib.request.Request(url=url, data=data_enc, method='PUT')
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
             resp = response.read().decode('ascii')
             dh = json.loads(resp)
         key = dh['key']
@@ -448,17 +469,18 @@ class PhilipsAirPurifierFan(FanEntity):
         self._session_key = session_key[:16]
 
     def _get_once(self, url):
-        with urllib.request.urlopen(url) as response:
+        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response:
             resp = response.read()
             resp = decrypt(resp.decode('ascii'), self._session_key)
             return json.loads(resp)
 
     def _get(self, url):
-        try:
-            return self._get_once(url)
-        except Exception:
-            self._get_key()
-            return self._get_once(url)
+        with self._io_lock:
+            try:
+                return self._get_once(url)
+            except Exception:
+                self._get_key()
+                return self._get_once(url)
 
     def _find_key(self, value_map, search_value):
         if search_value in value_map.values():
